@@ -29,9 +29,8 @@ from core.constellation import (
 from configs.formations import create_cube_formation
 from mechanics.moves import MovementSystem
 from mechanics.constellation_moves import ConstellationController
-from tasks.constellation_tasks import (
-    ConstellationTask, FormConstellationTask, MultiPointSensingTask
-)
+from tasks.constellation_tasks import ConstellationTask, FormConstellationTask
+from tasks.curriculum_tasks import TaskCurriculum, CurriculumSampler
 
 
 @dataclass
@@ -60,6 +59,8 @@ class TrainingConfig:
     
     # Task
     task_type: str = "form_constellation"
+    curriculum_enabled: bool = False
+    num_cubes_range: Tuple[int, int] = (8, 64)  # For curriculum
 
 
 class ConstellationTrainingEnv:
@@ -109,7 +110,7 @@ class ConstellationTrainingEnv:
         
         # Create swarm
         self.swarm = Swarm(self.num_cubes)
-        size = round(self.num_cubes ** (1/3))
+        size = int(np.ceil(self.num_cubes ** (1/3)))
         create_cube_formation(self.swarm, size=size)
         
         # Create constellation with generous propulsion
@@ -301,34 +302,47 @@ def train(config: TrainingConfig):
     # Create directories
     os.makedirs(config.save_dir, exist_ok=True)
     os.makedirs(config.log_dir, exist_ok=True)
+
+    # Create task and environment
+    def _make_env_and_sampler(config):
+        """Create environment and optional curriculum sampler."""
+        if config.curriculum_enabled:
+            curriculum = TaskCurriculum(num_cubes_range=config.num_cubes_range)
+            sampler = CurriculumSampler(curriculum)
+            task_key, task, num_cubes = sampler.sample()
+        else:
+            sampler = None
+            task = FormConstellationTask(target_num_groups=2, target_baseline=5000.0)
+            num_cubes = config.num_cubes
+            task_key = 'form_constellation'
     
-    # Create task
-    if config.task_type == "form_constellation":
-        task = FormConstellationTask(
-            target_num_groups=2,
-            target_baseline=5000.0,
-            min_group_size=8
+        env = ConstellationTrainingEnv(
+            num_cubes=num_cubes,
+            task=task,
+            max_steps=config.max_episode_steps,
         )
-    elif config.task_type == "multi_point":
-        task = MultiPointSensingTask(
-            target_num_groups=4,
-            target_volume=1e6,
-            min_group_size=4
-        )
-    else:
-        task = FormConstellationTask(
-            target_num_groups=2,
-            target_baseline=5000.0
-        )
+        env._current_task_key = task_key
+
+        return env, sampler
     
-    # Create environment
-    env = ConstellationTrainingEnv(
-        num_cubes=config.num_cubes,
-        task=task,
-        max_steps=config.max_episode_steps,
-        time_step=config.time_step
-    )
+    def _episode_end_reset(env, sampler, config, info):
+        """Reset env, optionally sampling a new task from the curriculum."""
+        if sampler is not None:
+            task_key = getattr(env, '_current_task_key', 'unknown')
+            sampler.record_outcome(
+                task_key,
+                success=info.get('task_complete', False),
+                progress=info.get('task_progress', 0.0),
+            )
+            new_task_key, new_task, num_cubes = sampler.sample()
+            env.task = new_task
+            env.num_cubes = num_cubes
+            env._current_task_key = new_task_key
     
+        return env.reset()
+
+    env, sampler = _make_env_and_sampler(config)
+
     # Create agent
     ppo_config = PPOConfig(
         learning_rate=3e-4,
@@ -461,7 +475,9 @@ def train(config: TrainingConfig):
                 recorder.start_episode(episode_count, {'task_type': config.task_type})
                 
                 # Reset environment
-                graph_data, mode_idx, env_features, action_masks = env.reset()
+                graph_data, mode_idx, env_features, action_masks = _episode_end_reset(
+                    env, sampler, config, info
+                )
                 episode_reward = 0.0
                 episode_length = 0
             
@@ -502,6 +518,12 @@ def train(config: TrainingConfig):
             learning_rate=ppo_config.learning_rate,
             timesteps=total_steps
         )
+
+        if num_updates % 10 == 0 and sampler is not None:
+            sampler.print_status()
+            for key, stats in sampler.get_status_dict().items():
+                logger.log_scalar(f"curriculum/{key}/tier", stats['tier'], total_steps)
+                logger.log_scalar(f"curriculum/{key}/success", stats['rolling_success'], total_steps)
         
         # Save checkpoint
         if total_steps % config.save_interval == 0:

@@ -17,14 +17,18 @@ def create_cube_formation(swarm: Swarm, size: int = 4,
         True if successful
     """
     needed = size ** 3
-    if swarm.num_cubes < needed:
-        raise ValueError(f"Need {needed} cubes for {size}x{size}x{size} cube, "
-                        f"but swarm only has {swarm.num_cubes}")
+    available = swarm.num_cubes
+    # if swarm.num_cubes < needed:
+    #     raise ValueError(f"Need {needed} cubes for {size}x{size}x{size} cube, "
+    #                     f"but swarm only has {swarm.num_cubes}")
     
     cube_id = 0
     for x in range(size):
         for y in range(size):
             for z in range(size):
+                if cube_id >= available:
+                    swarm.auto_connect_all()
+                    return True  # Placed all available cubes, done
                 pos = (origin[0] + x, origin[1] + y, origin[2] + z)
                 if not swarm.place_cube(cube_id, pos):
                     return False

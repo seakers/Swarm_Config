@@ -290,7 +290,7 @@ class SwarmGNN(nn.Module):
             # FiLM conditioning
             h = self.film_layers[i](h, goal_per_node)
             
-            h = F.relu(h)
+            h = F.relu(h).squeeze()
         
         # Global pooling (mean + max for richer representation)
         h_mean = global_mean_pool(h, batch)  # [batch_size, hidden_dim]

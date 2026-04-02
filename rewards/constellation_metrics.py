@@ -212,7 +212,7 @@ class ConstellationMetrics:
         # total_exposed_faces = 0
         # for group in self.constellation._groups.values():
         #     total_exposed_faces += group.swarm.get_surface_area()
-        total_exposed_faces = self.constellation.swarm.get_total_exposed_faces()
+        total_exposed_faces = self.constellation.swarm.get_surface_area()
 
         exposed_area_m2 = total_exposed_faces * self.CUBE_FACE_AREA_M2
         # Net radiation (outward) per unit area
@@ -344,7 +344,7 @@ class ConstellationMetrics:
         if not critical_cube_ids:
             return {'shielded_fraction': 1.0, 'mean_shield_depth': 0.0, 'threat_flux_reduction': 1.0}
 
-        occupied_positions = {c.position for c in all_cubes.values()}
+        occupied_positions = {c.position for c in all_cubes}
         shielded = 0
         shield_depths = []
 

@@ -51,7 +51,7 @@ class TrainingConfig:
     save_interval: int = 50_000
     eval_interval: int = 10_000
     plot_interval: int = 10  # Save plots every N updates
-    record_best: bool = True  # Record best episodes for animation
+    record_best: bool = False  # Record best episodes for animation
     
     # Paths
     save_dir: str = "./checkpoints"
@@ -365,11 +365,12 @@ def train(config: TrainingConfig):
     )
 
     # Create recorder
-    recorder = EpisodeRecorder(
-        save_dir=os.path.join(config.log_dir, config.task_type),
-        max_recordings=10,
-        record_frequency=100  # Record every 100 episodes
-    )
+    if config.record_best:
+        recorder = EpisodeRecorder(
+            save_dir=os.path.join(config.log_dir, config.task_type),
+            max_recordings=10,
+            record_frequency=100  # Record every 100 episodes
+        )
 
     # Training metrics
     episode_rewards = deque(maxlen=100)
@@ -380,7 +381,8 @@ def train(config: TrainingConfig):
     graph_data, mode_idx, env_features, action_masks = env.reset()
 
     episode_count = 0
-    recorder.start_episode(episode_count, {'task_type': config.task_type})
+    if config.record_best:
+        recorder.start_episode(episode_count, {'task_type': config.task_type})
     
     total_steps = 0
     num_updates = 0
@@ -421,13 +423,14 @@ def train(config: TrainingConfig):
                 action_type, sub_action, masks
             )
 
-            recorder.record_step(
-                env.constellation,
-                action_type,
-                sub_action,
-                reward,
-                info
-            )
+            if config.record_best:
+                recorder.record_step(
+                    env.constellation,
+                    action_type,
+                    sub_action,
+                    reward,
+                    info
+                )
             
             episode_reward += reward
             
@@ -467,12 +470,12 @@ def train(config: TrainingConfig):
                     delta_v_used=info.get('delta_v_used', 0.0)
                 )
 
-                # End recording
-                recorder.end_episode(info.get('task_complete', False))
-
-                # Start new recording
                 episode_count += 1
-                recorder.start_episode(episode_count, {'task_type': config.task_type})
+                if config.record_best:
+                    # End recording
+                    recorder.end_episode(info.get('task_complete', False))
+                    # Start new recording
+                    recorder.start_episode(episode_count, {'task_type': config.task_type})
                 
                 # Reset environment
                 graph_data, mode_idx, env_features, action_masks = _episode_end_reset(
@@ -480,6 +483,13 @@ def train(config: TrainingConfig):
                 )
                 episode_reward = 0.0
                 episode_length = 0
+
+                # Print progress
+                if episode_count % config.log_interval == 0:
+                    elapsed = time.time() - start_time
+                    mean_reward = np.mean(episode_rewards) if episode_rewards else 0.0
+                    print(f"Episode {episode_count} | Total Steps: {total_steps} | "
+                          f"Mean Reward: {mean_reward:.4f} | Total Elapsed Time: {elapsed:.2f}s")
             
             # Check if we should stop
             if total_steps >= config.total_timesteps:
@@ -521,9 +531,9 @@ def train(config: TrainingConfig):
 
         if num_updates % 10 == 0 and sampler is not None:
             sampler.print_status()
-            for key, stats in sampler.get_status_dict().items():
-                logger.log_scalar(f"curriculum/{key}/tier", stats['tier'], total_steps)
-                logger.log_scalar(f"curriculum/{key}/success", stats['rolling_success'], total_steps)
+            # for key, stats in sampler.get_status_dict().items():
+            #     logger.log_scalar(f"curriculum/{key}/tier", stats['tier'], total_steps)
+            #     logger.log_scalar(f"curriculum/{key}/success", stats['rolling_success'], total_steps)
         
         # Save checkpoint
         if total_steps % config.save_interval == 0:
@@ -547,9 +557,10 @@ def train(config: TrainingConfig):
             print(f"  Evaluation reward (5 ep): {eval_reward:.4f}")
 
     # Create animation of best episode
-    if recorder.best_recording is not None:
-        recorder.create_best_episode_animation(filename="best_episode")
-        recorder.save_recording_data(recorder.best_recording, "best_episode_data")
+    if config.record_best:
+        if recorder.best_recording is not None:
+            recorder.create_best_episode_animation(filename="best_episode")
+            recorder.save_recording_data(recorder.best_recording, "best_episode_data")
 
     # Print and save final summary
     logger.print_summary()

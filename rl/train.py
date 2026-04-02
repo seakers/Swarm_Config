@@ -20,7 +20,6 @@ from rl.observation_builder import (
     ObservationConfig
 )
 from rl.training_logger import TrainingLogger
-from rl.episode_recorder import EpisodeRecorder
 
 from core.swarm import Swarm
 from core.constellation import (
@@ -51,7 +50,6 @@ class TrainingConfig:
     save_interval: int = 50_000
     eval_interval: int = 10_000
     plot_interval: int = 10  # Save plots every N updates
-    record_best: bool = False  # Record best episodes for animation
     
     # Paths
     save_dir: str = "./checkpoints"
@@ -364,14 +362,6 @@ def train(config: TrainingConfig):
         save_frequency=config.plot_interval
     )
 
-    # Create recorder
-    if config.record_best:
-        recorder = EpisodeRecorder(
-            save_dir=os.path.join(config.log_dir, config.task_type),
-            max_recordings=10,
-            record_frequency=100  # Record every 100 episodes
-        )
-
     # Training metrics
     episode_rewards = deque(maxlen=100)
     episode_lengths = deque(maxlen=100)
@@ -380,10 +370,7 @@ def train(config: TrainingConfig):
     # Initialize environment
     graph_data, mode_idx, env_features, action_masks = env.reset()
 
-    episode_count = 0
-    if config.record_best:
-        recorder.start_episode(episode_count, {'task_type': config.task_type})
-    
+    episode_count = 0    
     total_steps = 0
     num_updates = 0
     episode_reward = 0.0
@@ -422,15 +409,6 @@ def train(config: TrainingConfig):
              new_action_masks, reward, done, info) = env.step(
                 action_type, sub_action, masks
             )
-
-            if config.record_best:
-                recorder.record_step(
-                    env.constellation,
-                    action_type,
-                    sub_action,
-                    reward,
-                    info
-                )
             
             episode_reward += reward
             
@@ -471,11 +449,6 @@ def train(config: TrainingConfig):
                 )
 
                 episode_count += 1
-                if config.record_best:
-                    # End recording
-                    recorder.end_episode(info.get('task_complete', False))
-                    # Start new recording
-                    recorder.start_episode(episode_count, {'task_type': config.task_type})
                 
                 # Reset environment
                 graph_data, mode_idx, env_features, action_masks = _episode_end_reset(
@@ -556,12 +529,6 @@ def train(config: TrainingConfig):
             eval_reward = evaluate_agent(agent, env, num_episodes=5)
             print(f"  Evaluation reward (5 ep): {eval_reward:.4f}")
 
-    # Create animation of best episode
-    if config.record_best:
-        if recorder.best_recording is not None:
-            recorder.create_best_episode_animation(filename="best_episode")
-            recorder.save_recording_data(recorder.best_recording, "best_episode_data")
-
     # Print and save final summary
     logger.print_summary()
     logger.save_data()
@@ -607,55 +574,3 @@ def evaluate_agent(agent: ConstellationPPOAgent,
         total_rewards.append(episode_reward)
     
     return np.mean(total_rewards)
-
-
-def main():
-    """Entry point for training."""
-    # import argparse
-    
-    # parser = argparse.ArgumentParser(description="Train constellation PPO agent")
-    # parser.add_argument("--num-cubes", type=int, default=64,
-    #                     help="Number of cubes in swarm")
-    # parser.add_argument("--total-timesteps", type=int, default=1_000_000,
-    #                     help="Total training timesteps")
-    # parser.add_argument("--task", type=str, default="form_constellation",
-    #                     choices=["form_constellation", "multi_point"],
-    #                     help="Task type")
-    # parser.add_argument("--save-dir", type=str, default="./checkpoints",
-    #                     help="Directory for saving checkpoints")
-    # parser.add_argument("--log-dir", type=str, default="./logs",
-    #                     help="Directory for logs")
-    # parser.add_argument("--rollout-steps", type=int, default=2048,
-    #                     help="Steps per rollout")
-    # parser.add_argument("--max-episode-steps", type=int, default=500,
-    #                     help="Max steps per episode")
-    
-    # args = parser.parse_args()
-    
-    # config = TrainingConfig(
-    #     num_cubes=args.num_cubes,
-    #     total_timesteps=args.total_timesteps,
-    #     task_type=args.task,
-    #     save_dir=args.save_dir,
-    #     log_dir=args.log_dir,
-    #     rollout_steps=args.rollout_steps,
-    #     max_episode_steps=args.max_episode_steps,
-    # )
-    params = {
-        "num_cubes": 8, # 64
-        "total_timesteps": 1_000, # 1_000_000
-        "task_type": "form_constellation",
-        "save_dir": "./checkpoints",
-        "log_dir": "./logs",
-        "rollout_steps": 2048,
-        "max_episode_steps": 500,
-    }
-    config = TrainingConfig(**params)
-    
-    agent = train(config)
-    
-    return agent
-
-
-if __name__ == "__main__":
-    main()

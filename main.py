@@ -10,8 +10,8 @@ def main():
         "log_dir": "./logs",
         "rollout_steps": 2048,
         "max_episode_steps": 1000,
-        "record_best": False,  # Enable recording of best episodes for animation, takes a while
     }
+    
     config = TrainingConfig(**params)
     
     agent = train(config)

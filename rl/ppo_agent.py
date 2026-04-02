@@ -437,7 +437,7 @@ class ConstellationPPOAgent:
     
     def load(self, path: str) -> None:
         """Load agent state."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.total_steps = checkpoint.get('total_steps', 0)

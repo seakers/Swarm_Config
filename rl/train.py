@@ -201,6 +201,11 @@ class ConstellationTrainingEnv:
         Execute action and return new observation, reward, done, info.
         """
         self.current_step += 1
+
+        # Track state before action
+        prev_progress = self.task.get_progress(self.constellation)
+        prev_baseline = self.constellation.get_max_baseline()
+        prev_num_groups = self.constellation.get_num_groups()
         
         # Decode and execute action
         action = self.mask_builder.decode_action(
@@ -242,14 +247,37 @@ class ConstellationTrainingEnv:
         if self.constellation.get_num_groups() > 1:
             self.constellation.propagate(self.time_step)
         
-        # Compute reward
-        if success:
-            task_reward = self.task.compute_reward(self.constellation)
-            step_penalty = 0.001
-            dv_penalty = 0.01 * delta_v_used
-            reward = task_reward - step_penalty - dv_penalty
+        reward = 0.0
+        
+        if not success:
+            # Invalid action penalty
+            reward = -0.1
+        elif action_type == 4:  # Noop
+            # Noop gets no positive reward, small penalty
+            reward = -0.01
         else:
-            reward = -0.1  # Invalid action penalty
+            # Compute improvement-based reward
+            curr_progress = self.task.get_progress(self.constellation)
+            improvement = curr_progress - prev_progress
+            
+            # Reward only positive improvements
+            if improvement > 0:
+                reward += improvement * 5.0
+            
+            # Small penalty for steps and delta-v
+            reward -= 0.001  # Step cost
+            reward -= 0.01 * delta_v_used  # Delta-v cost
+        
+        # === COMPLETION BONUS ===
+        if self.task.is_complete(self.constellation):
+            # Large bonus for completion, scaled by efficiency
+            steps_remaining = self.max_steps - self.current_step
+            efficiency_bonus = steps_remaining / self.max_steps
+            reward += 10.0 + (5.0 * efficiency_bonus)  # Reward faster completion
+        
+        # === FAILURE PENALTY ===
+        if self.task.is_failed(self.constellation):
+            reward -= 5.0
         
         self.episode_reward += reward
         

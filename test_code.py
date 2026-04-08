@@ -809,7 +809,7 @@ def main():
     print("=" * 60)
     
     # Run tests
-    test_basic_simulation()
+    # test_basic_simulation()
     # test_formations()
     # test_movement_mechanics()
     # test_tasks()
@@ -839,6 +839,8 @@ def main():
     #         test_visualization()
     # except Exception as e:
     #     print(f"\nSkipping visualization test: {e}")
+
+    test_visualization()
     
     print("\n" + "=" * 60)
     print("ALL TESTS COMPLETED")

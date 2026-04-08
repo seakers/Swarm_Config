@@ -667,8 +667,8 @@ class AgentVisualizer:
     def _capture_frame(self) -> np.ndarray:
         """Capture current figure as numpy array."""
         self.visualizer.fig.canvas.draw()
-        data = np.frombuffer(self.visualizer.fig.canvas.tostring_rgb(), dtype=np.uint8)
-        data = data.reshape(self.visualizer.fig.canvas.get_width_height()[::-1] + (3,))
+        data = np.frombuffer(self.visualizer.fig.canvas.tostring_argb(), dtype=np.uint8)
+        data = data.reshape(self.visualizer.fig.canvas.get_width_height()[::-1] + (4,))
         return data
     
     def _save_video(self, frames: List[np.ndarray], video_path: str, fps: int = 10) -> None:
@@ -758,7 +758,7 @@ def main():
         epilog="""
 Examples:
   # Run single episode on sparse_aperture task
-  python visualize_agent.py --checkpoint ./checkpoints/final_model.pt --task sparse_aperture
+  python visualize_agent.py --checkpoint ./checkpoints/best_model.pt --task sparse_aperture
   
   # Run on hard difficulty with more cubes
   python visualize_agent.py --checkpoint ./checkpoints/final_model.pt --task form_constellation --tier hard --num-cubes 48
@@ -784,7 +784,7 @@ Examples:
                         help='Difficulty tier')
     parser.add_argument('--num-cubes', type=int, default=None,
                         help='Number of cubes (overrides curriculum default)')
-    parser.add_argument('--max-steps', type=int, default=50,
+    parser.add_argument('--max-steps', type=int, default=100,
                         help='Maximum episode steps')
     parser.add_argument('--render-interval', type=int, default=1,
                         help='Render every N steps')

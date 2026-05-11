@@ -100,6 +100,32 @@ class ConstellationTrainingEnv:
         self.target_direction = (0.0, 1.0, 0.0)
         self.sun_distance_au = 10.0
         self.mission_mode = 0  # Index into mode list
+
+        self.gamma = 0.99
+        self.consecutive_noops = 0
+        self.max_consecutive_noops = 10  # Tune this
+        self.total_noops = 0
+        self.max_total_noops = 50  # Fraction of episode
+
+    def _compute_potential(self) -> float:
+        progress = self.task.get_progress(self.constellation)
+        
+        num_groups = self.constellation.get_num_groups()
+        target_groups = getattr(self.task, 'target_num_groups', 2)
+        # Use smooth function rather than linear — rewards getting closer continuously
+        group_score = np.exp(-abs(num_groups - target_groups))
+        
+        baseline = self.constellation.get_max_baseline()
+        target_baseline = getattr(self.task, 'target_baseline', 5000.0)
+        # Saturating function — diminishing returns past target
+        baseline_score = min(1.0, baseline / target_baseline)
+        
+        potential = (
+            0.5 * progress +
+            0.25 * group_score +
+            0.25 * baseline_score
+        )
+        return potential * 10.0
     
     def reset(self, seed: Optional[int] = None) -> Tuple:
         """Reset environment and return initial observation."""
@@ -136,6 +162,9 @@ class ConstellationTrainingEnv:
         # Create controllers
         self.movement = MovementSystem(self.swarm, require_connectivity=False)
         self.controller = ConstellationController(self.constellation)
+
+        self.consecutive_noops = 0
+        self.total_noops = 0
         
         self.current_step = 0
         self.episode_reward = 0.0
@@ -157,6 +186,14 @@ class ConstellationTrainingEnv:
         action_masks = self.mask_builder.build_action_masks(
             self.constellation, self.controller, self.movement
         )
+
+        # Store initial potential
+        self._prev_potential = self._compute_potential()
+
+        # === DIAGNOSTIC ===
+        # print(f"  RESET | num_groups={self.constellation.get_num_groups()} | "
+        #     f"is_failed={self.task.is_failed(self.constellation)} | "
+        #     f"progress={self.task.get_progress(self.constellation):.4f}")
         
         return graph_data, mode_idx, env_features, action_masks
     
@@ -202,6 +239,20 @@ class ConstellationTrainingEnv:
         """
         self.current_step += 1
 
+        # === DIAGNOSTIC: Print what's happening ===
+        # if self.current_step == 1:
+        #     print(f"  Step 1 | action_type={action_type} | "
+        #         f"num_groups_before={self.constellation.get_num_groups()} | "
+        #         f"progress_before={self.task.get_progress(self.constellation):.4f} | "
+        #         f"is_failed_before={self.task.is_failed(self.constellation)}")
+
+        # Track noop behavior
+        if action_type == 4:  # Noop
+            self.consecutive_noops += 1
+            self.total_noops += 1
+        else:
+            self.consecutive_noops = 0
+
         # Track state before action
         prev_progress = self.task.get_progress(self.constellation)
         prev_baseline = self.constellation.get_max_baseline()
@@ -246,46 +297,49 @@ class ConstellationTrainingEnv:
         # Propagate time if multiple groups
         if self.constellation.get_num_groups() > 1:
             self.constellation.propagate(self.time_step)
+
+        # === DIAGNOSTIC: Check what triggered termination ===
+        # terminated = (self.task.is_complete(self.constellation) or 
+        #             self.task.is_failed(self.constellation))
         
-        reward = 0.0
+        # if terminated and self.current_step == 1:
+        #     print(f"  TERMINATED ON STEP 1! | action_type={action_type} | "
+        #         f"success={success} | "
+        #         f"is_failed={self.task.is_failed(self.constellation)} | "
+        #         f"is_complete={self.task.is_complete(self.constellation)} | "
+        #         f"num_groups={self.constellation.get_num_groups()} | "
+        #         f"baseline={self.constellation.get_max_baseline():.1f}")
         
-        if not success:
-            # Invalid action penalty
-            reward = -0.1
-        elif action_type == 4:  # Noop
-            # Noop gets no positive reward, small penalty
-            reward = -0.01
+        # === HYBRID REWARD ===
+        
+        # 1. Potential-based shaping (dense, but preserves optimal policy)
+        curr_potential = self._compute_potential()
+        shaping_reward = self.gamma * curr_potential - self._prev_potential
+        self._prev_potential = curr_potential
+        
+        # 2. Small action costs
+        if action_type == 4:  # Noop
+            action_cost = -0.02  # Discourage but don't forbid
+        elif not success:
+            action_cost = -0.05  # Invalid action
         else:
-            # Compute improvement-based reward
-            curr_progress = self.task.get_progress(self.constellation)
-            improvement = curr_progress - prev_progress
-            
-            # Reward only positive improvements
-            if improvement > 0:
-                reward += improvement * 5.0
-            
-            # Small penalty for steps and delta-v
-            reward -= 0.001  # Step cost
-            reward -= 0.01 * delta_v_used  # Delta-v cost
+            action_cost = -0.001 - 0.01 * delta_v_used  # Step + fuel cost
         
-        # === COMPLETION BONUS ===
-        if self.task.is_complete(self.constellation):
-            # Large bonus for completion, scaled by efficiency
-            steps_remaining = self.max_steps - self.current_step
-            efficiency_bonus = steps_remaining / self.max_steps
-            reward += 10.0 + (5.0 * efficiency_bonus)  # Reward faster completion
-        
-        # === FAILURE PENALTY ===
-        if self.task.is_failed(self.constellation):
-            reward -= 5.0
-        
-        self.episode_reward += reward
-        
-        # Check termination
-        terminated = (self.task.is_complete(self.constellation) or 
-                      self.task.is_failed(self.constellation))
+        # 3. Sparse terminal reward
+        terminated = self.task.is_complete(self.constellation)
         truncated = self.current_step >= self.max_steps
         done = terminated or truncated
+        
+        terminal_reward = 0.0
+        if done:
+            final_progress = self.task.get_progress(self.constellation)
+            if terminated:
+                terminal_reward = 20.0  # Large bonus for task completion
+            else:
+                terminal_reward = 10.0 * final_progress - 5.0  # Partial credit minus penalty
+        
+        # Combined reward
+        reward = shaping_reward + action_cost + terminal_reward
         
         # Build new observation
         graph_data, mode_idx, env_features = self.obs_builder.build_observation(
@@ -312,6 +366,18 @@ class ConstellationTrainingEnv:
             'max_baseline': self.constellation.get_max_baseline(),
             'episode_reward': self.episode_reward,
         }
+
+        # Check for noop abuse
+        noop_abuse = (
+            self.consecutive_noops >= self.max_consecutive_noops or
+            self.total_noops >= self.max_total_noops
+        )
+        
+        if noop_abuse:
+            # End episode with penalty
+            done = True
+            reward = -5.0  # Significant penalty for doing nothing
+            info['termination_reason'] = 'noop_abuse'
         
         return graph_data, mode_idx, env_features, new_action_masks, reward, done, info
 

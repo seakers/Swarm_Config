@@ -4,12 +4,12 @@ def main():
     params = {
         "curriculum_enabled": True,
         # "num_cubes": 8, # 64 # not relevant when using curriculum
-        "total_timesteps": 1000, # 1_000_000
+        "total_timesteps": 100_000, # 1_000_000
         # "task_type": "form_constellation", # "form_constellation" # not relevant when using curriculum
         "save_dir": "./checkpoints",
         "log_dir": "./logs",
-        "rollout_steps": 2048,
-        "max_episode_steps": 100,
+        "rollout_steps": 2048, # 2048
+        "max_episode_steps": 500, # 1000
     }
 
     config = TrainingConfig(**params)

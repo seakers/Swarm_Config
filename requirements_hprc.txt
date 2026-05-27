@@ -1,0 +1,15 @@
+# Core dependencies (no version pins for flexibility)
+numpy<2
+scipy
+matplotlib
+networkx
+gymnasium
+tqdm
+psutil
+imageio
+cloudpickle
+
+# These will be installed separately:
+# - torch (from PyTorch index)
+# - torch-geometric (from PyG index)
+# - torch-scatter, torch-sparse, etc. (from PyG index)

@@ -83,6 +83,14 @@ class ConstellationObservationBuilder:
             mode_idx: Mission mode index tensor
             env_features: Environmental feature tensor
         """
+        actual_num_cubes = constellation.swarm.num_cubes
+        if actual_num_cubes > self.config.max_cubes:
+            raise ValueError(
+                f"Constellation has {actual_num_cubes} cubes but "
+                f"ObservationConfig.max_cubes={self.config.max_cubes}. "
+                f"Graph node indices will be wrong."
+            )
+
         device = torch.device('cpu')  # Will be moved to GPU during training
         
         # Build node features
@@ -430,6 +438,14 @@ class ActionMaskBuilder:
         
         Returns dict with masks for each action type and sub-action.
         """
+        actual_num_cubes = constellation.swarm.num_cubes
+        assert actual_num_cubes <= self.max_cubes, (
+            f"Constellation has {actual_num_cubes} cubes but ActionMaskBuilder.max_cubes="
+            f"{self.max_cubes}. Cube IDs beyond index {self.max_cubes - 1} will be "
+            f"silently dropped from masks, causing KeyError in _cube_propulsion. "
+            f"Either increase max_cubes in PPOConfig or cap num_cubes_range in curriculum."
+        )
+
         masks = {}
         
         # Action type mask

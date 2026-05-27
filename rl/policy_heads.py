@@ -33,9 +33,9 @@ class ActionTypeHead(nn.Module):
         self.num_action_types = num_action_types
         
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, input_dim // 2),
             nn.ReLU(),
-            nn.Linear(64, num_action_types),
+            nn.Linear(input_dim // 2, num_action_types),
         )
     
     def forward(self, global_features: torch.Tensor, 
@@ -51,7 +51,7 @@ class ActionTypeHead(nn.Module):
         logits = self.net(global_features)
         
         # Apply mask (set masked actions to large negative value)
-        logits = logits.masked_fill(~action_type_mask, -1e9)
+        logits = logits.masked_fill(~action_type_mask, torch.finfo(logits.dtype).min)
         
         return logits
 
@@ -73,9 +73,9 @@ class CubeMoveHead(nn.Module):
         
         # Combine node and global features
         self.node_scorer = nn.Sequential(
-            nn.Linear(node_dim + global_dim, 128),
+            nn.Linear(node_dim + global_dim, node_dim),
             nn.ReLU(),
-            nn.Linear(128, max_moves_per_cube),
+            nn.Linear(node_dim, max_moves_per_cube),
         )
     
     def forward(self,
@@ -115,27 +115,33 @@ class CubeMoveHead(nn.Module):
         # Reshape to batch form - need to handle variable num cubes per batch
         # For simplicity, we'll pad to max_cubes
         max_cubes = move_mask.size(1)
+        mask_value = torch.finfo(node_features.dtype).min
         logits = torch.full(
             (batch_size, max_cubes, self.max_moves_per_cube),
-            -1e9,
+            mask_value,
             device=node_features.device
         )
-
-        # Scatter scores into the padded tensor based on batch assignment
-        for i, (node_idx, batch_idx) in enumerate(zip(torch.where(cube_mask)[0], cube_batch)):
-            # Find which cube index within this batch
-            # This requires knowing the cube ordering within each batch
-            cube_idx_in_batch = (cube_batch[:i+1] == batch_idx).sum() - 1
-            if cube_idx_in_batch < max_cubes:
-                logits[batch_idx, cube_idx_in_batch] = scores[i]
+        scores = scores.to(logits.dtype)
+        
+        # Compute per-batch local cube indices using cumcount (cumsum trick, no loop)
+        ones = torch.ones(cube_batch.size(0), dtype=torch.long, device=cube_batch.device)
+        # For each node, count how many previous nodes belong to the same batch item
+        # This gives the 0-based local index of each cube within its batch
+        cube_idx_in_batch = torch.zeros_like(cube_batch)
+        for b in range(batch_size):  # This loop is over batch items (<=16 envs), not nodes
+            mask_b = (cube_batch == b)
+            cube_idx_in_batch[mask_b] = torch.arange(mask_b.sum(), device=cube_batch.device)
+        
+        # Now scatter in one shot - valid slots only
+        valid = cube_idx_in_batch < max_cubes
+        logits[cube_batch[valid], cube_idx_in_batch[valid]] = scores[valid]
         
         # Flatten to [batch_size, max_cubes * max_moves_per_cube]
         logits_flat = logits.view(batch_size, -1)
         
         # Apply move mask
         move_mask_flat = move_mask.view(batch_size, -1)
-        logits_flat = logits_flat.masked_fill(~move_mask_flat, -1e9)
-        
+        logits_flat = logits_flat.masked_fill(~move_mask_flat, mask_value)
         return logits_flat
 
 
@@ -157,11 +163,11 @@ class SeparationHead(nn.Module):
         # Score each candidate separation
         # Input: global features + aggregated features of separation set
         self.separation_scorer = nn.Sequential(
-            nn.Linear(global_dim + node_dim, 128),
+            nn.Linear(global_dim + node_dim, node_dim),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(node_dim, node_dim // 2),
             nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(node_dim // 2, 1),
         )
         
         # Attention to aggregate cube features for a separation set
@@ -194,10 +200,11 @@ class SeparationHead(nn.Module):
         """
         batch_size = global_features.size(0)
         device = node_features.device
+        mask_value = torch.finfo(node_features.dtype).min
         
         logits = torch.full(
             (batch_size, self.max_separations),
-            -1e9,
+            mask_value,
             device=device
         )
         
@@ -225,6 +232,7 @@ class SeparationHead(nn.Module):
                 sep_cube_mask = separation_cube_masks[b, s, :num_cubes_in_batch]
                 
                 if sep_cube_mask.sum() == 0:
+                    separation_valid_mask[b, s] = False
                     continue
                 
                 # Aggregate features of cubes in separation set
@@ -236,6 +244,7 @@ class SeparationHead(nn.Module):
                 # Combine with global features and score
                 combined = torch.cat([global_features[b], sep_aggregate], dim=-1)
                 score = self.separation_scorer(combined)
+                score = score.to(logits.dtype)
                 
                 logits[b, s] = score.squeeze()
         
@@ -260,11 +269,11 @@ class DockingHead(nn.Module):
         
         # Score each group pair
         self.pair_scorer = nn.Sequential(
-            nn.Linear(node_dim * 2 + global_dim, 128),
+            nn.Linear(node_dim * 2 + global_dim, node_dim),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(node_dim, node_dim // 2),
             nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(node_dim // 2, 1),
         )
     
     def forward(self,
@@ -286,10 +295,11 @@ class DockingHead(nn.Module):
         """
         batch_size = global_features.size(0)
         device = node_features.device
+        mask_value = torch.finfo(node_features.dtype).min
         
         logits = torch.full(
             (batch_size, self.max_docking_pairs),
-            -1e9,
+            mask_value,
             device=device
         )
         
@@ -324,6 +334,7 @@ class DockingHead(nn.Module):
                     ], dim=-1)
                     
                     score = self.pair_scorer(combined)
+                    score = score.to(logits.dtype)
                     logits[b, pair_idx] = score.squeeze()
                     
                     pair_idx += 1
@@ -350,9 +361,9 @@ class ManeuverHead(nn.Module):
         
         # Per-group direction scorer
         self.direction_scorer = nn.Sequential(
-            nn.Linear(node_dim + global_dim, 128),
+            nn.Linear(node_dim + global_dim, node_dim),
             nn.ReLU(),
-            nn.Linear(128, num_directions),
+            nn.Linear(node_dim, num_directions),
         )
     
     def forward(self,
@@ -374,10 +385,11 @@ class ManeuverHead(nn.Module):
         """
         batch_size = global_features.size(0)
         device = node_features.device
+        mask_value = torch.finfo(node_features.dtype).min
         
         logits = torch.full(
             (batch_size, self.max_groups * self.num_directions),
-            -1e9,
+            mask_value,
             device=device
         )
         
@@ -401,6 +413,7 @@ class ManeuverHead(nn.Module):
                 ], dim=-1)
                 
                 direction_scores = self.direction_scorer(combined)  # [num_directions]
+                direction_scores = direction_scores.to(logits.dtype)
                 
                 # Place in output
                 start_idx = g * self.num_directions
@@ -409,7 +422,7 @@ class ManeuverHead(nn.Module):
                 logits[b, start_idx:end_idx] = direction_scores
         
         # Apply mask
-        logits = logits.masked_fill(~maneuver_valid_mask, -1e9)
+        logits = logits.masked_fill(~maneuver_valid_mask, mask_value)
         
         return logits
 

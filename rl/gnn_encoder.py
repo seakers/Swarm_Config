@@ -31,7 +31,7 @@ class FiLMLayer(nn.Module):
         self.beta_net = nn.Linear(condition_dim, feature_dim)
         
         # Initialize to identity transformation
-        nn.init.ones_(self.gamma_net.weight.data * 0.01)
+        nn.init.constant_(self.gamma_net.weight, 0.01)
         nn.init.zeros_(self.gamma_net.bias.data)
         nn.init.zeros_(self.beta_net.weight.data)
         nn.init.zeros_(self.beta_net.bias.data)
@@ -263,16 +263,16 @@ class SwarmGNN(nn.Module):
         # Encode cube nodes
         if cube_mask.any():
             cube_features = x[cube_mask, :25]  # First 25 features are cube features
-            h[cube_mask] = self.cube_encoder(cube_features)
+            h[cube_mask] = self.cube_encoder(cube_features).to(h.dtype)
         
         # Encode group nodes  
         if group_mask.any():
             group_features = x[group_mask, :12]  # First 12 features are group features
-            h[group_mask] = self.group_encoder(group_features)
+            h[group_mask] = self.group_encoder(group_features).to(h.dtype)
         
         # Global nodes start as zeros (will aggregate info)
         # Add node type embedding
-        h = h + self.node_type_embedding(node_type)
+        h = h + self.node_type_embedding(node_type).to(h.dtype)
         
         # Expand goal_embedding to match nodes
         # goal_embedding is [batch_size, goal_dim]

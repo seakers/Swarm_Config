@@ -239,7 +239,8 @@ class Constellation:
         
         # Per-cube propulsion (cubes contribute to group propulsion when grouped)
         self._cube_propulsion: Dict[int, PropulsionSubsystem] = {
-            i: PropulsionSubsystem() for i in range(swarm.num_cubes)
+            cube.cube_id: PropulsionSubsystem()
+            for cube in swarm.get_all_cubes()
         }
         
         # Time tracking for propagation
@@ -382,7 +383,18 @@ class Constellation:
         separating_cubes_delta_v = sum(
             self._cube_propulsion[cid].remaining_delta_v
             for cid in cube_ids_to_separate
+            if cid in self._cube_propulsion
         )
+
+        missing = [cid for cid in cube_ids_to_separate if cid not in self._cube_propulsion]
+        if missing:
+            # Rebuild propulsion for missing cubes
+            for cid in missing:
+                self._cube_propulsion[cid] = PropulsionSubsystem(
+                    max_delta_v=100.0,
+                    remaining_delta_v=100.0,
+                )
+            print(f"[WARNING] Rebuilt _cube_propulsion for missing cube IDs: {missing}")
         
         if separating_cubes_delta_v < self.separation_reqs.min_separation_delta_v:
             return False, f"Insufficient delta-v for separation (need {self.separation_reqs.min_separation_delta_v} m/s)"

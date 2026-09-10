@@ -25,8 +25,8 @@ from enum import Enum
 import time
 
 # Project imports - adjust paths as needed
-from rl.ppo_agent import ConstellationPPOAgent, PPOConfig
-from rl.train import ConstellationTrainingEnv, TrainingConfig
+from rl.ppo_agent_fast import FastConstellationPPOAgent, PPOConfig, FastRolloutBuffer
+from rl.env_wrapper import ConstellationTrainingEnv
 from tasks.curriculum_tasks import TaskCurriculum, CurriculumSampler
 from core.swarm import Swarm
 from core.constellation import Constellation
@@ -448,13 +448,13 @@ class AgentVisualizer:
         self.agent = self._load_agent(checkpoint_path)
         self.visualizer = ConstellationVisualizer()
         
-    def _load_agent(self, checkpoint_path: str) -> ConstellationPPOAgent:
+    def _load_agent(self, checkpoint_path: str) -> FastConstellationPPOAgent:
         """Load a trained agent from checkpoint."""
         print(f"Loading agent from {checkpoint_path}...")
         
         # Create agent with default config (will be overwritten by checkpoint)
         config = PPOConfig()
-        agent = ConstellationPPOAgent(config, self.device)
+        agent = FastConstellationPPOAgent(config, self.device)
         agent.load(checkpoint_path)
         
         print(f"Agent loaded successfully on {self.device}")

@@ -162,6 +162,8 @@ class GNNPPOTrainer:
                     joint = {mid: int(a_i[r])
                              for r, mid in enumerate(g.id_order)}
                     next_obs, reward, term, trunc, info = env.step(joint)
+                    if not np.isfinite(reward):
+                        reward = 0.0
                     done = float(term or trunc)
 
                     # Store this env's transition (per-graph record).

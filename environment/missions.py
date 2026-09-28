@@ -156,7 +156,7 @@ class ThermalMission(Mission):
 
         # Fixed-point / Newton iteration on radiative + conductive balance.
         T = np.full(N, 250.0)  # K initial guess
-        for _ in range(50):
+        for _ in range(15):
             rad = emis_area * STEFAN_BOLTZMANN * (T**4 - SPACE_TEMPERATURE**4)
             cond = np.array([
                 sum(CONDUCTION_COEFF * (T[i] - T[j]) for j in neighbors[i])
@@ -170,12 +170,16 @@ class ThermalMission(Mission):
             denom = drad + dcond
             denom = np.where(denom < 1e-9, 1e-9, denom)
             T = T + f / denom
-            T = np.clip(T, SPACE_TEMPERATURE, 1e4)
+            T = np.nan_to_num(T, nan=SPACE_TEMPERATURE, posinf=1e4, neginf=SPACE_TEMPERATURE)
+            T = np.clip(T, SPACE_TEMPERATURE, 2000.0)   # 2000K hard cap, not 1e4
         return T
 
     def objective(self, modules) -> float:
         T = self._steady_state_temps(modules)
-        return float(np.max(T))
+        val = float(np.max(T))
+        if not np.isfinite(val):
+            return 2000.0   # worst-case sentinel, still finite
+        return val
 
 
 class CommsMission(Mission):

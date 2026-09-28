@@ -206,6 +206,8 @@ class CTDETrainer:
                     joint = {mid: int(a_i[r])
                              for r, mid in enumerate(lg.id_order)}
                     next_obs, reward, term, trunc, info = env.step(joint)
+                    if not np.isfinite(reward):
+                        reward = 0.0
                     done = float(term or trunc)
 
                     buffer.add(

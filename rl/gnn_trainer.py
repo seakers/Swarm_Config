@@ -41,6 +41,7 @@ class GNNTrainConfig:
 
     total_steps: int = 300_000
     rollout_len: int = 2048
+    n_envs: int = 32
     gamma: float = 0.99
     gae_lambda: float = 0.95
     lr: float = 3e-4
@@ -114,14 +115,19 @@ class GNNPPOTrainer:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
         buffer = GNNRolloutBuffer()
 
-        env = self._new_env()
-        obs_struct, _ = env.reset(seed=self._episode_seed)
+        # --- Parallel environments ---
+        envs = [self._new_env() for _ in range(cfg.n_envs)]
+        obs_list = [e.reset(seed=self._episode_seed + i)[0]
+                    for i, e in enumerate(envs)]
 
         global_step = 0
-        ep_return = 0.0
+        ep_return = np.zeros(cfg.n_envs)
         ep_returns, ep_objectives = [], []
         update_idx = 0
         t_start = time.perf_counter()
+
+        # Steps taken per rollout so buffer holds ~rollout_len transitions total.
+        steps_per_rollout = max(1, cfg.rollout_len // cfg.n_envs)
 
         history = {"step": [], "ep_return": [], "ep_objective": [],
                    "policy_loss": [], "value_loss": [], "entropy": [],
@@ -129,33 +135,67 @@ class GNNPPOTrainer:
 
         while global_step < cfg.total_steps:
             buffer.reset()
-            for _ in range(cfg.rollout_len):
-                tr, obs_struct, done, info = self._rollout_step(env, obs_struct)
-                buffer.add(tr["graph"], tr["mask"], tr["action"],
-                           tr["log_prob"], tr["reward"], tr["value"], tr["done"])
-                ep_return += tr["reward"]
-                global_step += 1
-                if done:
-                    ep_returns.append(ep_return)
-                    ep_objectives.append(info["objective"])
-                    ep_return = 0.0
-                    env = self._new_env()          # resample task (N, mission)
-                    obs_struct, _ = env.reset(seed=self._episode_seed)
 
-            # Bootstrap value for GAE from the current (possibly new) state.
-            graph = build_graph_from_global_obs(obs_struct)
-            (nf, ei, ef, batch, _) = collate_graphs([graph])
+            for _ in range(steps_per_rollout):
+                # Build one batched graph across all envs.
+                graphs = [build_graph_from_global_obs(o) for o in obs_list]
+                nf, ei, ef, batch, sizes = collate_graphs(graphs)
+                masks = [node_action_mask(e, g.id_order)
+                         for e, g in zip(envs, graphs)]
+                mask_cat = np.concatenate(masks, axis=0)
+
+                t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
+                with torch.no_grad():
+                    actions, log_prob, value = self.policy.act(
+                        t(nf, torch.float32), t(ei, torch.int64),
+                        t(ef, torch.float32), t(batch, torch.int64),
+                        num_graphs=cfg.n_envs, mask=t(mask_cat, torch.float32))
+                actions_np = actions.cpu().numpy()
+                logp_np = log_prob.cpu().numpy()
+                value_np = value.cpu().numpy()
+
+                # Scatter actions back to each env by node offset.
+                node_off = 0
+                for i, (env, g) in enumerate(zip(envs, graphs)):
+                    n_i = g.node_features.shape[0]
+                    a_i = actions_np[node_off: node_off + n_i]
+                    joint = {mid: int(a_i[r])
+                             for r, mid in enumerate(g.id_order)}
+                    next_obs, reward, term, trunc, info = env.step(joint)
+                    done = float(term or trunc)
+
+                    # Store this env's transition (per-graph record).
+                    buffer.add(
+                        graph=g, mask=masks[i], action=a_i,
+                        log_prob=float(logp_np[i]), reward=reward,
+                        value=float(value_np[i]), done=done)
+
+                    ep_return[i] += reward
+                    global_step += 1
+                    if done:
+                        ep_returns.append(float(ep_return[i]))
+                        ep_objectives.append(info["objective"])
+                        ep_return[i] = 0.0
+                        self._episode_seed += 1
+                        envs[i] = self._new_env()
+                        obs_list[i] = envs[i].reset(
+                            seed=self._episode_seed)[0]
+                    else:
+                        obs_list[i] = next_obs
+                    node_off += n_i
+
+            # --- Bootstrap values for GAE (one batched forward) ---
+            graphs = [build_graph_from_global_obs(o) for o in obs_list]
+            nf, ei, ef, batch, _ = collate_graphs(graphs)
             t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
             with torch.no_grad():
-                _, _, last_value = self.policy.act(
+                _, _, last_values = self.policy.act(
                     t(nf, torch.float32), t(ei, torch.int64),
                     t(ef, torch.float32), t(batch, torch.int64),
-                    num_graphs=1,
-                    mask=t(node_action_mask(env, graph.id_order),
-                           torch.float32),
-                    deterministic=True)
-            buffer.compute_gae(float(last_value.item()),
-                               cfg.gamma, cfg.gae_lambda)
+                    num_graphs=cfg.n_envs, deterministic=True)
+            # Use mean bootstrap value across envs for the single-buffer GAE.
+            buffer.compute_gae(float(last_values.mean().item()),
+                                    cfg.gamma, cfg.gae_lambda)
 
             stats = gnn_ppo_update(self.policy, self.optimizer, buffer,
                                    self.ppo_cfg, device=cfg.device)

@@ -41,6 +41,7 @@ class CTDETrainConfig:
 
     total_steps: int = 300_000
     rollout_len: int = 2048
+    n_envs: int = 32
     gamma: float = 0.99
     gae_lambda: float = 0.95
     lr: float = 3e-4
@@ -138,36 +139,103 @@ class CTDETrainer:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
         buffer = CTDERolloutBuffer()
 
-        env = self._new_env()
-        env.reset(seed=self._episode_seed)
+        # --- Parallel environments ---
+        envs = [self._new_env() for _ in range(cfg.n_envs)]
+        for i, e in enumerate(envs):
+            e.reset(seed=self._episode_seed + i)
 
         global_step = 0
-        ep_return = 0.0
+        ep_return = np.zeros(cfg.n_envs)
         ep_returns, ep_objectives = [], []
         update_idx = 0
         t_start = time.perf_counter()
+
+        steps_per_rollout = max(1, cfg.rollout_len // cfg.n_envs)
+        t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
+
         history = {"step": [], "ep_return": [], "ep_objective": [],
                    "policy_loss": [], "value_loss": [], "entropy": [],
                    "kl": [], "clip_frac": []}
 
         while global_step < cfg.total_steps:
             buffer.reset()
-            for _ in range(cfg.rollout_len):
-                tr, done, info = self._step(env)
-                buffer.add(tr["local_graph"], tr["global_graph"], tr["mask"],
-                           tr["action"], tr["log_prob"], tr["reward"],
-                           tr["value"], tr["done"])
-                ep_return += tr["reward"]
-                global_step += 1
-                if done:
-                    ep_returns.append(ep_return)
-                    ep_objectives.append(info["objective"])
-                    ep_return = 0.0
-                    env = self._new_env()
-                    env.reset(seed=self._episode_seed)
 
-            last_value = self._bootstrap_value(env)
-            buffer.compute_gae(last_value, cfg.gamma, cfg.gae_lambda)
+            for _ in range(steps_per_rollout):
+                # Build LOCAL graphs (actor) and GLOBAL graphs (critic) per env.
+                local_graphs, global_graphs, masks = [], [], []
+                for env in envs:
+                    mission = env.mission.config.primary_objective
+                    all_local = env.all_local_observations()
+                    lg = build_local_graph(
+                        all_local, mission,
+                        env.mission.config.sun_direction,
+                        env.mission.config.earth_direction,
+                    )
+                    gobs = env.global_observation()
+                    gg = build_graph_from_global_obs(gobs)
+                    local_graphs.append(lg)
+                    global_graphs.append(gg)
+                    masks.append(node_action_mask(env, lg.id_order))
+
+                # Batch both graph sets.
+                lnf, lei, lef, lbatch, _ = collate_graphs(local_graphs)
+                gnf, gei, gef, gbatch, _ = collate_graphs(global_graphs)
+                mask_cat = np.concatenate(masks, axis=0)
+
+                with torch.no_grad():
+                    actions, log_prob = self.ac.act(
+                        t(lnf, torch.float32), t(lei, torch.int64),
+                        t(lef, torch.float32), t(lbatch, torch.int64),
+                        num_graphs=cfg.n_envs,
+                        mask=t(mask_cat, torch.float32), deterministic=False)
+                    value = self.ac.value(
+                        t(gnf, torch.float32), t(gei, torch.int64),
+                        t(gef, torch.float32), t(gbatch, torch.int64),
+                        num_graphs=cfg.n_envs)
+
+                actions_np = actions.cpu().numpy()
+                logp_np = log_prob.cpu().numpy()
+                value_np = value.cpu().numpy()
+
+                # Scatter actions back per env by node offset (local ordering).
+                node_off = 0
+                for i, env in enumerate(envs):
+                    lg = local_graphs[i]
+                    n_i = lg.node_features.shape[0]
+                    a_i = actions_np[node_off: node_off + n_i]
+                    joint = {mid: int(a_i[r])
+                             for r, mid in enumerate(lg.id_order)}
+                    next_obs, reward, term, trunc, info = env.step(joint)
+                    done = float(term or trunc)
+
+                    buffer.add(
+                        local_graph=lg, global_graph=global_graphs[i],
+                        mask=masks[i], action=a_i,
+                        log_prob=float(logp_np[i]), reward=reward,
+                        value=float(value_np[i]), done=done)
+
+                    ep_return[i] += reward
+                    global_step += 1
+                    if done:
+                        ep_returns.append(float(ep_return[i]))
+                        ep_objectives.append(info["objective"])
+                        ep_return[i] = 0.0
+                        self._episode_seed += 1
+                        envs[i] = self._new_env()
+                        envs[i].reset(seed=self._episode_seed)
+                    node_off += n_i
+
+            # --- Bootstrap values for GAE (one batched critic forward) ---
+            global_graphs = [build_graph_from_global_obs(e.global_observation())
+                             for e in envs]
+            gnf, gei, gef, gbatch, _ = collate_graphs(global_graphs)
+            with torch.no_grad():
+                last_values = self.ac.value(
+                    t(gnf, torch.float32), t(gei, torch.int64),
+                    t(gef, torch.float32), t(gbatch, torch.int64),
+                    num_graphs=cfg.n_envs)
+            buffer.compute_gae(float(last_values.mean().item()),
+                               cfg.gamma, cfg.gae_lambda)
 
             stats = ctde_ppo_update(self.ac, self.optimizer, buffer,
                                     self.ppo_cfg, device=cfg.device)

@@ -38,6 +38,8 @@ def main():
                     choices=["improvement", "absolute"])
     ap.add_argument("--total-steps", type=int, default=300_000)
     ap.add_argument("--rollout-len", type=int, default=2048)
+    ap.add_argument("--n-envs", type=int, default=32,
+                    help="number of parallel environments")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--hidden-dim", type=int, default=128)
     ap.add_argument("--n-layers", type=int, default=3,
@@ -61,7 +63,7 @@ def main():
         shape=args.shape, max_steps=args.max_steps,
         sun_direction=tuple(args.sun_direction), reward_mode=args.reward_mode,
         total_steps=args.total_steps, rollout_len=args.rollout_len,
-        gamma=args.gamma, gae_lambda=args.gae_lambda, lr=args.lr,
+        n_envs=args.n_envs, gamma=args.gamma, gae_lambda=args.gae_lambda, lr=args.lr,
         hidden_dim=args.hidden_dim, n_layers=args.n_layers,
         seed=args.seed, device=args.device,
         checkpoint_dir=args.checkpoint_dir, checkpoint_name=args.checkpoint_name,

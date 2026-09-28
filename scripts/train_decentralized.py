@@ -35,6 +35,8 @@ def main():
                     choices=["improvement", "absolute"])
     ap.add_argument("--total-steps", type=int, default=400_000)
     ap.add_argument("--rollout-len", type=int, default=2048)
+    ap.add_argument("--n-envs", type=int, default=32,
+                    help="number of parallel environments")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--hidden-dim", type=int, default=128)
     ap.add_argument("--actor-layers", type=int, default=2,
@@ -59,7 +61,7 @@ def main():
         n_modules_choices=args.n, mission_choices=args.missions,
         shape=args.shape, max_steps=args.max_steps,
         sun_direction=tuple(args.sun_direction), reward_mode=args.reward_mode,
-        total_steps=args.total_steps, rollout_len=args.rollout_len,
+        total_steps=args.total_steps, rollout_len=args.rollout_len, n_envs=args.n_envs,
         gamma=args.gamma, gae_lambda=args.gae_lambda, lr=args.lr,
         hidden_dim=args.hidden_dim, actor_layers=args.actor_layers,
         critic_layers=args.critic_layers, seed=args.seed, device=args.device,

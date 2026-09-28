@@ -48,69 +48,77 @@ def build_scenarios(missions, n_list, shapes, config_seeds,
 
 
 def main():
-    params = {
-        "missions": ["power", "thermal", "comms", "aperture"],
-        "n": [64],
-        "shapes": ["random"],
-        "config_seeds": [0, 1, 2], # [0, 1, 2],
-        "controllers": ['random', 'greedy_joint', 'greedy_seq', 'astar', 'centralized_gnn', 'decentralized_gnn'], # astar
-        "gnn_checkpoint": "checkpoints/gnn_centralized.pt",
-        "decentralized_checkpoint": "checkpoints/gnn_decentralized.pt",
-        "max_steps": 200,
-        "sun_direction": [0.0, 0.0, 1.0],
-        "best_known_expansions": 10_000,
-        "no_best_known": False,
-        "results_base": "results",
-        "repeats": 10,
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "replot": None, # "results/20260925_013037", #path to existing results dir to replot only (no new runs)
-    }
+    ap = argparse.ArgumentParser(description="Modular spacecraft benchmark.")
+    ap.add_argument("--missions", nargs="+",
+                    default=["power", "thermal", "comms", "aperture"])
+    ap.add_argument("--n", nargs="+", type=int, default=[4, 6, 8])
+    ap.add_argument("--shapes", nargs="+", default=["random"])
+    ap.add_argument("--config-seeds", nargs="+", type=int, default=[0, 1, 2])
+    ap.add_argument("--controllers", nargs="+", default=None,
+                    help="subset of registered controllers (default: all)")
+    ap.add_argument("--gnn-checkpoint", type=str,
+                    default="checkpoints/gnn_centralized.pt")
+    ap.add_argument("--decentralized-checkpoint", type=str,
+                    default="checkpoints/gnn_decentralized.pt")
+    ap.add_argument("--max-steps", type=int, default=200)
+    ap.add_argument("--sun-direction", nargs=3, type=float,
+                    default=[0.0, 0.0, 1.0])
+    ap.add_argument("--best-known-expansions", type=int, default=10_000)
+    ap.add_argument("--no-best-known", action="store_true")
+    ap.add_argument("--results-base", type=str, default="results")
+    ap.add_argument("--repeats", type=int, default=10)
+    ap.add_argument("--eval-device", type=str,
+                    default="cuda" if torch.cuda.is_available() else "cpu",
+                    choices=["cpu", "cuda"])
+    ap.add_argument("--replot", type=str, default=None,
+                    help="path to existing results dir to replot only")
+    args = ap.parse_args()
 
-    if params["replot"]:
-        with open(os.path.join(params["replot"], "records.json")) as f:
+    if args.replot:
+        with open(os.path.join(args.replot, "records.json")) as f:
             rows = json.load(f)
         # Reconstruct minimal RunRecord objects from rows.
         records = [RunRecord(**{k: row[k] for k in row
                                 if k in RunRecord.__dataclass_fields__})
                    for row in rows]
-        plot_all_results(records, os.path.join(params["replot"], "plots"))
-        print(f"Replotted into {os.path.join(params["replot"], 'plots')}")
+        plot_all_results(records, os.path.join(args.replot, "plots"))
+        print(f"Replotted into {os.path.join(args.replot, 'plots')}")
         return
 
     # --- Build scenarios (shared across all controllers) ---
     scenarios = build_scenarios(
-        params["missions"], params["n"], params["shapes"],
-        params["config_seeds"], params["max_steps"],
-        params["sun_direction"],
+        args.missions, args.n, args.shapes,
+        args.config_seeds, args.max_steps,
+        args.sun_direction,
     )
 
     # --- Resolve controller set ---
     registry = build_controller_registry(
-        gnn_checkpoint=params["gnn_checkpoint"],
-        decentralized_checkpoint=params["decentralized_checkpoint"],
-        device=params["device"],
+        gnn_checkpoint=args.gnn_checkpoint,
+        decentralized_checkpoint=args.decentralized_checkpoint,
+        device=args.device,
     )
-    if params["controllers"]:
-        unknown = [c for c in params["controllers"] if c not in registry]
+    if args.controllers:
+        unknown = [c for c in args.controllers if c not in registry]
         if unknown:
             raise SystemExit(f"Unknown controllers: {unknown}. "
                              f"Available: {sorted(registry)}")
-        controller_names = params["controllers"]
+        controller_names = args.controllers
     else:
         controller_names = list(registry.keys())
 
     # --- Set up results directory + manifest ---
-    results_dir = make_results_dir(params["results_base"])
+    results_dir = make_results_dir(args.results_base)
     write_manifest(results_dir, scenarios, controller_names, extra={
-        "missions": params["missions"],
-        "n": params["n"],
-        "shapes": params["shapes"],
-        "config_seeds": params["config_seeds"],
-        "max_steps": params["max_steps"],
-        "sun_direction": params["sun_direction"],
-        "best_known_expansions": params["best_known_expansions"],
-        "no_best_known": params["no_best_known"],
-        "repeats": params["repeats"],
+        "missions": args.missions,
+        "n": args.n,
+        "shapes": args.shapes,
+        "config_seeds": args.config_seeds,
+        "max_steps": args.max_steps,
+        "sun_direction": args.sun_direction,
+        "best_known_expansions": args.best_known_expansions,
+        "no_best_known": args.no_best_known,
+        "repeats": args.repeats,
     })
     print(f"Results directory: {results_dir}")
     print(f"Scenarios: {len(scenarios)} | Controllers: {controller_names}")
@@ -124,17 +132,17 @@ def main():
         print("=" * 70)
 
         # Reference optimum (shared per scenario) for distance-from-best metric.
-        if params["no_best_known"]:
+        if args.no_best_known:
             best_known = float("nan")
         else:
             print("  Computing best-known objective (objective-max A*)...")
             best_known = compute_best_known(
-                scenario, max_expansions=params["best_known_expansions"])
+                scenario, max_expansions=args.best_known_expansions)
             print(f"  best_known objective = {best_known:.3f}")
 
         for name in controller_names:
             factory, is_stochastic = registry[name]
-            n_runs = params["repeats"] if is_stochastic else 1
+            n_runs = args.repeats if is_stochastic else 1
             run_finals = []
             for run_idx in range(n_runs):
                 eval_seed = scenario.config_seed * 1000 + run_idx

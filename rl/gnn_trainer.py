@@ -27,6 +27,7 @@ from rl.action_masking import node_action_mask
 from rl.ppo import PPOConfig
 from controllers.gnn_policy import GNNPolicy
 from evaluation.metrics import save_training_log, plot_training_curves
+from rl.vec_env import make_vec_env, build_task_samplers
 
 
 @dataclass
@@ -37,11 +38,14 @@ class GNNTrainConfig:
     shape: str = "line"
     max_steps: int = 40
     sun_direction: tuple = (0.0, 0.0, 1.0)
+    earth_direction: tuple = (0.0, 1.0, 0.0)
     reward_mode: str = "improvement"
 
     total_steps: int = 300_000
     rollout_len: int = 2048
     n_envs: int = 32
+    n_workers: int = 8
+    use_subproc: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
     lr: float = 3e-4
@@ -115,19 +119,21 @@ class GNNPPOTrainer:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
         buffer = GNNRolloutBuffer()
 
-        # --- Parallel environments ---
-        envs = [self._new_env() for _ in range(cfg.n_envs)]
-        obs_list = [e.reset(seed=self._episode_seed + i)[0]
-                    for i, e in enumerate(envs)]
+        # --- Vector env ---
+        env_fns = build_task_samplers(cfg, cfg.n_envs)
+        vec = make_vec_env(env_fns, n_workers=cfg.n_workers,
+                           use_subproc=cfg.use_subproc)
+
+        # state[i] = (gobs, lobs, mask, id_order, reward, done, objective)
+        state = vec.reset()
 
         global_step = 0
         ep_return = np.zeros(cfg.n_envs)
         ep_returns, ep_objectives = [], []
         update_idx = 0
         t_start = time.perf_counter()
-
-        # Steps taken per rollout so buffer holds ~rollout_len transitions total.
         steps_per_rollout = max(1, cfg.rollout_len // cfg.n_envs)
+        t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
 
         history = {"step": [], "ep_return": [], "ep_objective": [],
                    "policy_loss": [], "value_loss": [], "entropy": [],
@@ -137,14 +143,14 @@ class GNNPPOTrainer:
             buffer.reset()
 
             for _ in range(steps_per_rollout):
-                # Build one batched graph across all envs.
-                graphs = [build_graph_from_global_obs(o) for o in obs_list]
-                nf, ei, ef, batch, sizes = collate_graphs(graphs)
-                masks = [node_action_mask(e, g.id_order)
-                         for e, g in zip(envs, graphs)]
+                # --- Act on the CURRENT state ---
+                graphs = [build_graph_from_global_obs(s[0]) for s in state]
+                masks = [s[2] for s in state]
+                id_orders = [s[3] for s in state]
+
+                nf, ei, ef, batch, _ = collate_graphs(graphs)
                 mask_cat = np.concatenate(masks, axis=0)
 
-                t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
                 with torch.no_grad():
                     actions, log_prob, value = self.policy.act(
                         t(nf, torch.float32), t(ei, torch.int64),
@@ -154,48 +160,49 @@ class GNNPPOTrainer:
                 logp_np = log_prob.cpu().numpy()
                 value_np = value.cpu().numpy()
 
-                # Scatter actions back to each env by node offset.
-                node_off = 0
-                for i, (env, g) in enumerate(zip(envs, graphs)):
+                # Slice per-env actions and build joint actions.
+                joint_actions, slices = [], []
+                off = 0
+                for i, g in enumerate(graphs):
                     n_i = g.node_features.shape[0]
-                    a_i = actions_np[node_off: node_off + n_i]
-                    joint = {mid: int(a_i[r])
-                             for r, mid in enumerate(g.id_order)}
-                    next_obs, reward, term, trunc, info = env.step(joint)
-                    if not np.isfinite(reward):
-                        reward = 0.0
-                    done = float(term or trunc)
+                    a_i = actions_np[off: off + n_i]
+                    joint_actions.append(
+                        {mid: int(a_i[r]) for r, mid in enumerate(id_orders[i])})
+                    slices.append((off, n_i))
+                    off += n_i
 
-                    # Store this env's transition (per-graph record).
+                # --- Step all envs in parallel ---
+                results = vec.step(joint_actions)
+
+                # --- Store transitions (graph/mask/action we ACTED on) ---
+                for i in range(cfg.n_envs):
+                    o, n_i = slices[i]
+                    reward = results[i][4]
+                    done = results[i][5]
+                    objective = results[i][6]
                     buffer.add(
-                        graph=g, mask=masks[i], action=a_i,
+                        graph=graphs[i], mask=masks[i],
+                        action=actions_np[o: o + n_i],
                         log_prob=float(logp_np[i]), reward=reward,
-                        value=float(value_np[i]), done=done)
-
+                        value=float(value_np[i]), done=float(done))
                     ep_return[i] += reward
                     global_step += 1
                     if done:
                         ep_returns.append(float(ep_return[i]))
-                        ep_objectives.append(info["objective"])
+                        ep_objectives.append(objective)
                         ep_return[i] = 0.0
-                        self._episode_seed += 1
-                        envs[i] = self._new_env()
-                        obs_list[i] = envs[i].reset(
-                            seed=self._episode_seed)[0]
-                    else:
-                        obs_list[i] = next_obs
-                    node_off += n_i
 
-            # --- Bootstrap values for GAE (one batched forward) ---
-            graphs = [build_graph_from_global_obs(o) for o in obs_list]
+                # --- Advance: overwrite held state with the step result ---
+                state = results
+
+            # --- Bootstrap values from the CURRENT state ---
+            graphs = [build_graph_from_global_obs(s[0]) for s in state]
             nf, ei, ef, batch, _ = collate_graphs(graphs)
-            t = lambda x, dt: torch.as_tensor(x, dtype=dt, device=cfg.device)
             with torch.no_grad():
                 _, _, last_values = self.policy.act(
                     t(nf, torch.float32), t(ei, torch.int64),
                     t(ef, torch.float32), t(batch, torch.int64),
                     num_graphs=cfg.n_envs, deterministic=True)
-            # Use mean bootstrap value across envs for the single-buffer GAE.
             buffer.compute_gae(float(last_values.mean().item()),
                                     cfg.gamma, cfg.gae_lambda)
 
@@ -224,6 +231,7 @@ class GNNPPOTrainer:
                       f"ent={stats['entropy']:.3f} kl={stats['kl']:.4f} "
                       f"| {sps:.0f} steps/s")
 
+        vec.close()
         ckpt_path = os.path.join(cfg.checkpoint_dir, cfg.checkpoint_name)
         self.save(ckpt_path)
         print(f"\nTraining complete. Checkpoint saved to {ckpt_path}")
@@ -240,3 +248,28 @@ class GNNPPOTrainer:
             "edge_dim": self.edge_dim,
             "train_config": self.cfg.__dict__,
         }, path)
+
+    def _make_env_fn(self):
+        """Return a picklable-ish factory that samples a random (N, mission).
+
+        NOTE: uses a fresh RNG per call seeded from a counter so subprocess
+        workers produce varied, reproducible tasks.
+        """
+        cfg = self.cfg
+        base_seed = cfg.seed
+        counter = {"i": 0}
+        choices_n = list(cfg.n_modules_choices)
+        choices_m = list(cfg.mission_choices)
+
+        def fn():
+            counter["i"] += 1
+            rng = np.random.default_rng(base_seed * 100000 + counter["i"])
+            n = int(rng.choice(choices_n))
+            mission = str(rng.choice(choices_m))
+            seed = base_seed * 100000 + counter["i"]
+            return make_env(
+                n_modules=n, shape=cfg.shape, mission=mission,
+                sun_direction=cfg.sun_direction, max_steps=cfg.max_steps,
+                reward_mode=cfg.reward_mode, seed=seed,
+            )
+        return fn
